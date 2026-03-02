@@ -1,12 +1,10 @@
 import { headers } from "next/headers";
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
-import RedirectToApp from "./RedirectToApp"; // ✅ NEW
+import RedirectToApp from "./RedirectToApp";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// ✅ FIX 1: ensure the page always fetches fresh data
+export const dynamic = "force-dynamic";
 
 // HI5 brand colors
 const HI5_ORANGE = "#de8a02";
@@ -35,10 +33,11 @@ function isUuid(v: string) {
 export default async function MediaPage({
   params,
 }: {
-  params: Promise<{ id?: string }>;
+  // ✅ FIX 2 (for your Next.js): params is a Promise, must be awaited
+  params: Promise<{ id: string }>;
 }) {
-  const resolvedParams = await params;
-  const qrId = resolvedParams?.id;
+  // ✅ FIX 2: unwrap params first
+  const { id: qrId } = await params;
 
   // Production: no debug detail
   if (!qrId || !isUuid(qrId)) {
@@ -52,9 +51,12 @@ export default async function MediaPage({
     );
   }
 
-  const { data: qr, error: qrError } = await supabase
-    .from("qr_codes")
-    .select("id, type, title, storage_path, mime_type, original_name")
+  // ✅ NEW: read from qr_items (Phase 1)
+  const { data: qr, error: qrError } = await supabaseAdmin
+    .from("qr_items")
+    .select(
+      "id, type, status, text_content, storage_bucket, storage_path, mime_type, original_name"
+    )
     .eq("id", qrId)
     .single();
 
@@ -69,7 +71,7 @@ export default async function MediaPage({
     );
   }
 
-  // Scan logging
+  // Scan logging (keep)
   const h = await headers();
   const ua = h.get("user-agent") ?? "";
   const ref = h.get("referer") ?? "";
@@ -78,7 +80,7 @@ export default async function MediaPage({
   const device_type = deviceTypeFromUA(ua);
   const ip_hash = ip ? hashIp(ip) : null;
 
-  await supabase.from("scans").insert({
+  await supabaseAdmin.from("scans").insert({
     qr_id: qrId,
     device_type,
     user_agent: ua,
@@ -86,172 +88,87 @@ export default async function MediaPage({
     ip_hash,
   });
 
-  // Signed URL generation (quietly, production-friendly)
+  // ✅ TEXT Mode 2: show text card (no storage)
+  if (qr.type === "TEXT") {
+    return (
+      <main
+        style={{
+          fontFamily: "system-ui",
+          height: "100vh",
+          width: "100vw",
+          margin: 0,
+          padding: 0,
+          overflow: "hidden",
+          position: "relative",
+          background: `radial-gradient(950px 520px at 12% 0%, rgba(222,138,2,0.18), transparent 60%),
+                       radial-gradient(1200px 700px at 90% 10%, rgba(12,26,43,0.22), transparent 60%),
+                       ${HI5_NAVY}`,
+        }}
+      >
+        <Hi5Badge />
+        <PoweredBy />
+        <RedirectToApp qrId={qrId} />
+
+        <CenterCard title="HI5 Message" subtitle={qr.text_content ?? ""} isPre />
+      </main>
+    );
+  }
+
+  // ✅ FILES: if not READY, show uploading state
+  if (qr.status !== "READY") {
+    return (
+      <main
+        style={{
+          fontFamily: "system-ui",
+          height: "100vh",
+          width: "100vw",
+          margin: 0,
+          padding: 0,
+          overflow: "hidden",
+          position: "relative",
+          background: `radial-gradient(950px 520px at 12% 0%, rgba(222,138,2,0.18), transparent 60%),
+                       radial-gradient(1200px 700px at 90% 10%, rgba(12,26,43,0.22), transparent 60%),
+                       ${HI5_NAVY}`,
+        }}
+      >
+        <Hi5Badge />
+        <PoweredBy />
+        <RedirectToApp qrId={qrId} />
+
+        <CenterCard
+          title="Upload in progress"
+          subtitle="This QR was created, but the file hasn’t finished uploading yet. Please refresh in a moment."
+        />
+      </main>
+    );
+  }
+
+  // Signed URL generation (quietly)
   let signedUrl: string | null = null;
+
+  const bucket = qr.storage_bucket || "hi5-uploads";
 
   if (qr.storage_path) {
     const parts = qr.storage_path.split("/");
     const fileName = parts.pop()!;
     const folder = parts.join("/");
 
-    const { data: listed, error: listErr } = await supabase.storage
-      .from("hi5qr-uploads")
+    const { data: listed, error: listErr } = await supabaseAdmin.storage
+      .from(bucket)
       .list(folder, { limit: 100 });
 
     if (!listErr) {
       const exists = (listed ?? []).some((x) => x.name === fileName);
 
       if (exists) {
-        const { data: signed, error: signErr } = await supabase.storage
-          .from("hi5qr-uploads")
+        const { data: signed, error: signErr } = await supabaseAdmin.storage
+          .from(bucket)
           .createSignedUrl(qr.storage_path, 3600);
 
         if (!signErr) signedUrl = signed?.signedUrl ?? null;
       }
     }
   }
-
-  const Hi5Badge = () => (
-    <div
-      style={{
-        position: "absolute",
-        top: 14,
-        left: 14,
-        zIndex: 10,
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "8px 10px",
-        borderRadius: 16,
-        background: "rgba(255,255,255,0.86)",
-        border: `1px solid rgba(12,26,43,0.14)`,
-        boxShadow: "0 12px 34px rgba(0,0,0,0.14)",
-        backdropFilter: "blur(12px)",
-      }}
-      title="HI5"
-    >
-      <div
-        style={{
-          width: 34,
-          height: 34,
-          borderRadius: 14,
-          background: `linear-gradient(135deg, ${HI5_ORANGE}, #ffb03a)`,
-          display: "grid",
-          placeItems: "center",
-          boxShadow: "0 10px 24px rgba(222,138,2,0.30)",
-          overflow: "hidden",
-        }}
-      >
-        <img
-          src={HI5_LOGO_SRC}
-          alt="HI5"
-          style={{ width: 24, height: 24, objectFit: "contain" }}
-        />
-      </div>
-
-      <div
-        style={{
-          fontWeight: 900,
-          letterSpacing: 0.6,
-          color: HI5_NAVY,
-          lineHeight: 1,
-          fontSize: 14,
-        }}
-      >
-        HI5
-      </div>
-    </div>
-  );
-
-  const DownloadButton = ({ href }: { href: string }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      style={{
-        position: "absolute",
-        top: 14,
-        right: 14,
-        zIndex: 10,
-        textDecoration: "none",
-        background: `linear-gradient(135deg, ${HI5_NAVY}, #0a1422)`,
-        color: "#fff",
-        border: `1px solid rgba(222,138,2,0.35)`,
-        padding: "10px 14px",
-        borderRadius: 18,
-        fontSize: 13,
-        fontWeight: 800,
-        letterSpacing: 0.25,
-        boxShadow: "0 14px 40px rgba(12,26,43,0.32)",
-        backdropFilter: "blur(10px)",
-      }}
-      title="Open / Download"
-    >
-      Open / Download
-    </a>
-  );
-
-  const PoweredBy = () => (
-    <div
-      style={{
-        position: "absolute",
-        bottom: 12,
-        right: 14,
-        zIndex: 10,
-        fontSize: 12,
-        background: "rgba(255,255,255,0.72)",
-        border: `1px solid rgba(12,26,43,0.12)`,
-        padding: "7px 11px",
-        borderRadius: 999,
-        backdropFilter: "blur(10px)",
-        color: HI5_NAVY,
-        boxShadow: "0 10px 26px rgba(0,0,0,0.10)",
-      }}
-    >
-      Powered by{" "}
-      <span style={{ fontWeight: 900, color: HI5_ORANGE }}>hi5qr.com</span>
-    </div>
-  );
-
-  const CenterCard = ({
-    title,
-    subtitle,
-  }: {
-    title: string;
-    subtitle?: string;
-  }) => (
-    <div
-      style={{
-        height: "100%",
-        display: "grid",
-        placeItems: "center",
-        padding: 24,
-      }}
-    >
-      <div
-        style={{
-          width: "min(600px, 100%)",
-          borderRadius: 22,
-          border: `1px solid rgba(12,26,43,0.14)`,
-          boxShadow: "0 18px 55px rgba(0,0,0,0.12)",
-          padding: 22,
-          background: "rgba(255,255,255,0.92)",
-          backdropFilter: "blur(14px)",
-          color: HI5_NAVY,
-        }}
-      >
-        <h2 style={{ margin: 0 }}>{title}</h2>
-        {subtitle ? (
-          <p style={{ marginTop: 10, opacity: 0.82, lineHeight: 1.55 }}>
-            {subtitle}
-          </p>
-        ) : null}
-        <p style={{ marginTop: 14, fontSize: 12, opacity: 0.65 }}>
-          Secure access • Link expires in ~1 hour (refresh to regenerate).
-        </p>
-      </div>
-    </div>
-  );
 
   return (
     <main
@@ -270,7 +187,7 @@ export default async function MediaPage({
     >
       <Hi5Badge />
       <PoweredBy />
-      <RedirectToApp qrId={qrId} /> {/* ✅ NEW */}
+      <RedirectToApp qrId={qrId} />
 
       {!qr.storage_path ? (
         <CenterCard
@@ -309,3 +226,154 @@ export default async function MediaPage({
     </main>
   );
 }
+
+const Hi5Badge = () => (
+  <div
+    style={{
+      position: "absolute",
+      top: 14,
+      left: 14,
+      zIndex: 10,
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "8px 10px",
+      borderRadius: 16,
+      background: "rgba(255,255,255,0.86)",
+      border: `1px solid rgba(12,26,43,0.14)`,
+      boxShadow: "0 12px 34px rgba(0,0,0,0.14)",
+      backdropFilter: "blur(12px)",
+    }}
+    title="HI5"
+  >
+    <div
+      style={{
+        width: 34,
+        height: 34,
+        borderRadius: 14,
+        background: `linear-gradient(135deg, ${HI5_ORANGE}, #ffb03a)`,
+        display: "grid",
+        placeItems: "center",
+        boxShadow: "0 10px 24px rgba(222,138,2,0.30)",
+        overflow: "hidden",
+      }}
+    >
+      <img
+        src={HI5_LOGO_SRC}
+        alt="HI5"
+        style={{ width: 24, height: 24, objectFit: "contain" }}
+      />
+    </div>
+
+    <div
+      style={{
+        fontWeight: 900,
+        letterSpacing: 0.6,
+        color: HI5_NAVY,
+        lineHeight: 1,
+        fontSize: 14,
+      }}
+    >
+      HI5
+    </div>
+  </div>
+);
+
+const DownloadButton = ({ href }: { href: string }) => (
+  <a
+    href={href}
+    target="_blank"
+    rel="noreferrer"
+    style={{
+      position: "absolute",
+      top: 14,
+      right: 14,
+      zIndex: 10,
+      textDecoration: "none",
+      background: `linear-gradient(135deg, ${HI5_NAVY}, #0a1422)`,
+      color: "#fff",
+      border: `1px solid rgba(222,138,2,0.35)`,
+      padding: "10px 14px",
+      borderRadius: 18,
+      fontSize: 13,
+      fontWeight: 800,
+      letterSpacing: 0.25,
+      boxShadow: "0 14px 40px rgba(12,26,43,0.32)",
+      backdropFilter: "blur(10px)",
+    }}
+    title="Open / Download"
+  >
+    Open / Download
+  </a>
+);
+
+const PoweredBy = () => (
+  <div
+    style={{
+      position: "absolute",
+      bottom: 12,
+      right: 14,
+      zIndex: 10,
+      fontSize: 12,
+      background: "rgba(255,255,255,0.72)",
+      border: `1px solid rgba(12,26,43,0.12)`,
+      padding: "7px 11px",
+      borderRadius: 999,
+      backdropFilter: "blur(10px)",
+      color: HI5_NAVY,
+      boxShadow: "0 10px 26px rgba(0,0,0,0.10)",
+    }}
+  >
+    Powered by <span style={{ fontWeight: 900, color: HI5_ORANGE }}>hi5qr.com</span>
+  </div>
+);
+
+const CenterCard = ({
+  title,
+  subtitle,
+  isPre,
+}: {
+  title: string;
+  subtitle?: string;
+  isPre?: boolean;
+}) => (
+  <div
+    style={{
+      height: "100%",
+      display: "grid",
+      placeItems: "center",
+      padding: 24,
+    }}
+  >
+    <div
+      style={{
+        width: "min(600px, 100%)",
+        borderRadius: 22,
+        border: `1px solid rgba(12,26,43,0.14)`,
+        boxShadow: "0 18px 55px rgba(0,0,0,0.12)",
+        padding: 22,
+        background: "rgba(255,255,255,0.92)",
+        backdropFilter: "blur(14px)",
+        color: HI5_NAVY,
+      }}
+    >
+      <h2 style={{ margin: 0 }}>{title}</h2>
+
+      {subtitle ? (
+        isPre ? (
+          <pre style={{ marginTop: 10, whiteSpace: "pre-wrap", opacity: 0.9 }}>
+            {subtitle}
+          </pre>
+        ) : (
+          <p style={{ marginTop: 10, opacity: 0.82, lineHeight: 1.55 }}>
+            {subtitle}
+          </p>
+        )
+      ) : null}
+
+      <p style={{ marginTop: 14, fontSize: 12, opacity: 0.65 }}>
+        Secure access • Link expires in ~1 hour (refresh to regenerate).
+      </p>
+    </div>
+  </div>
+);
