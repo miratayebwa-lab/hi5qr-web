@@ -78,6 +78,7 @@ export async function POST(req: Request) {
       throw new Error(signedErr?.message || "Failed to create signed upload URL");
     }
 
+    console.log("[uploads/create] DEBUG ROUTE v2 ACTIVE");
     console.log("[uploads/create] OK", { qrId });
 
     return NextResponse.json({
